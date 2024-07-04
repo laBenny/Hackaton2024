@@ -24,9 +24,13 @@ trip_id_unique_station = data['trip_id_unique_station']
 # Define the target
 target = 'passengers_up'
 
-# Convert all columns except trip_id_unique_station to numeric where possible
-data = data.apply(pd.to_numeric, errors='coerce', downcast='float')
-data['trip_id_unique_station'] = trip_id_unique_station
+# Convert all columns except categorical ones to numeric where possible
+categorical_columns = ['part', 'trip_id_unique', 'cluster', 'station_name', 'arrival_time', 'door_closing_time', 'trip_id_unique_station']
+data[categorical_columns] = data[categorical_columns].astype(str)
+data_numeric = data.drop(columns=categorical_columns).apply(pd.to_numeric, errors='coerce', downcast='float')
+
+# Include categorical columns back into the dataframe
+data = pd.concat([data_numeric, data[categorical_columns]], axis=1)
 
 # Create new features
 data['latitude_longitude'] = data['latitude'] * data['longitude']
@@ -39,19 +43,24 @@ y = data[target]
 # Handle missing values, removing features with all NaN values
 X = X.dropna(axis=1, how='all')
 
-# Handle missing values
+# Handle missing values for numeric columns
+numeric_columns = X.select_dtypes(include=[np.number]).columns
 imputer = SimpleImputer(strategy='mean')
-X_imputed = imputer.fit_transform(X.select_dtypes(include=[np.number]))
-X_imputed = pd.DataFrame(X_imputed, columns=X.select_dtypes(include=[np.number]).columns)
-X_imputed['trip_id_unique_station'] = trip_id_unique_station
+X_imputed_numeric = imputer.fit_transform(X[numeric_columns])
+X_imputed_numeric = pd.DataFrame(X_imputed_numeric, columns=numeric_columns)
+
+# Include categorical columns back after imputation
+X_imputed = pd.concat([X_imputed_numeric, X[categorical_columns].reset_index(drop=True)], axis=1)
 
 y_imputed = imputer.fit_transform(y.values.reshape(-1, 1)).ravel()
 
 # Normalize numerical features
 scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_imputed.select_dtypes(include=[np.number]))
-X_scaled = pd.DataFrame(X_scaled, columns=X_imputed.select_dtypes(include=[np.number]).columns)
-X_scaled['trip_id_unique_station'] = trip_id_unique_station
+X_scaled_numeric = scaler.fit_transform(X_imputed[numeric_columns])
+X_scaled_numeric = pd.DataFrame(X_scaled_numeric, columns=numeric_columns)
+
+# Include categorical columns back after scaling
+X_scaled = pd.concat([X_scaled_numeric, X_imputed[categorical_columns].reset_index(drop=True)], axis=1)
 
 # Ensure that the column names are preserved after scaling
 feature_names = X_scaled.columns
@@ -71,10 +80,29 @@ percentages = [0.05, 0.2, 0.5, 0.75]
 results = []
 
 for perc in percentages:
-    # Split the data into training and testing sets with a different random seed each time
+    # Sample the specified percentage of the data
+    data_sampled = data.sample(frac=perc, random_state=42)
+    
+    # Separate the sampled data into features and target
+    X_sampled = data_sampled.drop(columns=[target])
+    y_sampled = data_sampled[target]
+    
+    # Handle missing values for the sampled data
+    X_sampled_imputed_numeric = imputer.fit_transform(X_sampled[numeric_columns])
+    X_sampled_imputed_numeric = pd.DataFrame(X_sampled_imputed_numeric, columns=numeric_columns)
+    X_sampled_imputed = pd.concat([X_sampled_imputed_numeric, X_sampled[categorical_columns].reset_index(drop=True)], axis=1)
+
+    y_sampled_imputed = imputer.fit_transform(y_sampled.values.reshape(-1, 1)).ravel()
+    
+    # Normalize numerical features for the sampled data
+    X_sampled_scaled_numeric = scaler.fit_transform(X_sampled_imputed[numeric_columns])
+    X_sampled_scaled_numeric = pd.DataFrame(X_sampled_scaled_numeric, columns=numeric_columns)
+    X_sampled_scaled = pd.concat([X_sampled_scaled_numeric, X_sampled_imputed[categorical_columns].reset_index(drop=True)], axis=1)
+    
+    # Split the sampled data into training and testing sets
     random_seed = np.random.randint(10000)  # Change this to any random number for each run
     X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
-        X_scaled, y_imputed, data.index, test_size=(1-perc), random_state=random_seed)
+        X_sampled_scaled, y_sampled_imputed, data_sampled.index, test_size=0.2, random_state=random_seed)
 
     model = RandomForestRegressor(
         n_estimators=best_params['n_estimators'],
@@ -84,10 +112,10 @@ for perc in percentages:
         bootstrap=best_params['bootstrap'],
         random_state=42
     )
-    model.fit(X_train.drop(columns=['trip_id_unique_station']), y_train)
+    model.fit(X_train[numeric_columns], y_train)
 
     # Make predictions on the testing set
-    y_pred = model.predict(X_test.drop(columns=['trip_id_unique_station']))
+    y_pred = model.predict(X_test[numeric_columns])
     y_pred = y_pred.round().astype(int)
     y_pred = np.maximum(0, y_pred)
 
@@ -99,14 +127,14 @@ for perc in percentages:
     print(f'Percentage: {perc*100}% - Random Forest - MAE: {mae:.4f}, RMSE: {rmse:.4f}')
 
     # Feature importance
-    feature_importances = pd.DataFrame({'Feature': feature_names.drop('trip_id_unique_station'), 'Importance': model.feature_importances_})
+    feature_importances = pd.DataFrame({'Feature': numeric_columns, 'Importance': model.feature_importances_})
     feature_importances = feature_importances.sort_values(by='Importance', ascending=False)
 
     print("\nFeature Importances:")
     print(feature_importances)
 
     # Prepare the final output
-    y_final_pred = model.predict(X_test.drop(columns=['trip_id_unique_station']))
+    y_final_pred = model.predict(X_test[numeric_columns])
     y_final_pred = y_final_pred.round().astype(int)
     y_final_pred = np.maximum(0, y_final_pred)
 
